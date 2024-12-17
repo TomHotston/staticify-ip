@@ -7,7 +7,7 @@ use std::net::IpAddr;
 trait IpReconfigurer {
     fn get_public_ip(&self) -> Result<IpAddr>;
     fn get_last_ip(&self) -> Result<IpAddr>;
-    fn reconfigure_public_ip(&self);
+    fn reconfigure_public_ip(&self, ip: IpAddr);
     fn readback_configured_ip(&self) -> Result<IpAddr>;
 }
 
@@ -18,7 +18,7 @@ where
     let public_ip = ip_getter.get_public_ip()?;
     let last_ip = ip_getter.get_last_ip()?;
     if public_ip != last_ip {
-        ip_getter.reconfigure_public_ip();
+        ip_getter.reconfigure_public_ip(public_ip);
         if ip_getter.readback_configured_ip()? != public_ip {
             panic!("IP addresses do not match after reconfiguration");
         }
@@ -69,7 +69,9 @@ mod tests {
             .returning(|| Ok("127.0.0.2".parse::<IpAddr>()?));
         mock.expect_get_last_ip()
             .returning(|| Ok("127.0.0.1".parse::<IpAddr>()?));
-        mock.expect_reconfigure_public_ip().return_const(());
+        mock.expect_reconfigure_public_ip()
+            .with(eq("127.0.0.2".parse::<IpAddr>().unwrap()))
+            .return_const(());
         mock.expect_readback_configured_ip()
             .returning(|| Ok("127.0.0.2".parse::<IpAddr>()?));
         compare_ips(mock).unwrap();
@@ -83,7 +85,9 @@ mod tests {
             .returning(|| Ok("127.0.0.2".parse::<IpAddr>()?));
         mock.expect_get_last_ip()
             .returning(|| Ok("127.0.0.1".parse::<IpAddr>()?));
-        mock.expect_reconfigure_public_ip().return_const(());
+        mock.expect_reconfigure_public_ip()
+            .with(eq("127.0.0.2".parse::<IpAddr>().unwrap()))
+            .return_const(());
         mock.expect_readback_configured_ip()
             .returning(|| Ok("127.0.0.1".parse::<IpAddr>()?));
         compare_ips(mock).unwrap();
