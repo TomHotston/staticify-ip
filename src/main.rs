@@ -1,0 +1,53 @@
+use log::{debug, error, info};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::process::exit;
+
+const FILE_NAME: &str = "staticify-ip.toml";
+
+#[derive(Serialize, Deserialize, PartialEq, Clone)]
+struct Config {
+    token: String,
+    website: String,
+    zone_id: String,
+}
+
+impl Config {
+    fn new() -> Self {
+        let default_file = Self {
+            token: String::from("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+            website: String::from("test.example.com"),
+            zone_id: String::from("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"),
+        };
+
+        let content = match fs::read_to_string(FILE_NAME).ok() {
+            Some(c) => match toml::from_str(&c) {
+                Ok(t) => t,
+                Err(_) => {
+                    error!("TOML file is not configured correctly");
+                    panic!("TOML file is not configured correctly");
+                }
+            },
+            _ => default_file.clone(),
+        };
+        if content == default_file {
+            info!("TOML file has not been configured");
+            let toml_file = toml::to_string(&content).unwrap();
+            fs::write(FILE_NAME, toml_file).unwrap();
+            exit(1);
+        }
+
+        content
+    }
+}
+
+fn main() {
+    env_logger::init();
+    debug!("logger initialised");
+
+    let config = Config::new();
+
+    let server_config =
+        staticify_ip::ServerConfigurator::new(&config.token, &config.website, &config.zone_id);
+    staticify_ip::configure(server_config).unwrap();
+}
