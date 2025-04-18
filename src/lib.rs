@@ -7,13 +7,18 @@ use reqwest::blocking::get;
 use std::marker::PhantomData;
 use std::net::Ipv4Addr;
 
+/// Reference to API of which local IP
 const PUBLIC_IP_API: &str = "https://api.ipify.org";
 
+/// A state when IP addresses are uninitialised or unchecked
 pub struct Unvalidated;
+/// A state when IP addresses do not match
 pub struct Invalid;
+/// A state when IP addresses match
 pub struct Valid;
 
-pub struct ServerConfig<State = Unvalidated> {
+/// Server configurator enables configuring of Cloudflare to match local IP addresses
+pub struct ServerConfigurator<State = Unvalidated> {
     state: PhantomData<State>,
     actual_ip: Ipv4Addr,
     configured_ip: Ipv4Addr,
@@ -23,9 +28,11 @@ pub struct ServerConfig<State = Unvalidated> {
     config_record_id: String,
 }
 
+/// A result type used to capture the state following validations.
+/// Where the types can be valid or invalid
 pub enum ValidationResult {
-    Valid(ServerConfig<Valid>),
-    Invalid(ServerConfig<Invalid>),
+    Valid(ServerConfigurator<Valid>),
+    Invalid(ServerConfigurator<Invalid>),
 }
 
 trait Validateable<T> {
@@ -38,7 +45,8 @@ trait Configurable<T> {
     fn reconfigure(self) -> T;
 }
 
-impl ServerConfig {
+impl ServerConfigurator {
+    /// Initialise a new `ServerConfigurator`
     pub fn new(token: &str, site: &str, zone: &str) -> Self {
         debug!(
             "Created server configurator: configuring {} in zone {}",
@@ -67,7 +75,7 @@ impl ServerConfig {
     }
 }
 
-impl<T> ServerConfig<T> {
+impl<T> ServerConfigurator<T> {
     fn log_ips(&self) {
         debug!(
             "actual ip: {:?} configured ip: {:?}",
@@ -76,7 +84,7 @@ impl<T> ServerConfig<T> {
     }
 }
 
-fn get_configured_ip<T>(server_config: &ServerConfig<T>) -> Result<(Ipv4Addr, String)> {
+fn get_configured_ip<T>(server_config: &ServerConfigurator<T>) -> Result<(Ipv4Addr, String)> {
     let endpoint = cloudflare::endpoints::dns::dns::ListDnsRecords {
         zone_identifier: &server_config.config_zone,
         params: cloudflare::endpoints::dns::dns::ListDnsRecordsParams {
@@ -124,7 +132,7 @@ fn get_actual_ip() -> Result<Ipv4Addr> {
     Ok(get(PUBLIC_IP_API)?.text()?.parse()?)
 }
 
-impl Validateable<ValidationResult> for ServerConfig<Unvalidated> {
+impl Validateable<ValidationResult> for ServerConfigurator<Unvalidated> {
     fn update_ips(&mut self) -> Result<()> {
         self.actual_ip = get_actual_ip()?;
         (self.configured_ip, self.config_record_id) = get_configured_ip(self)?;
@@ -138,7 +146,7 @@ impl Validateable<ValidationResult> for ServerConfig<Unvalidated> {
         match self.actual_ip == self.configured_ip {
             true => {
                 info!("IP configuration is valid");
-                ValidationResult::Valid(ServerConfig {
+                ValidationResult::Valid(ServerConfigurator {
                     state: PhantomData,
                     actual_ip: self.actual_ip,
                     configured_ip: self.configured_ip,
@@ -150,7 +158,7 @@ impl Validateable<ValidationResult> for ServerConfig<Unvalidated> {
             }
             false => {
                 info!("IP configuration is invalid");
-                ValidationResult::Invalid(ServerConfig {
+                ValidationResult::Invalid(ServerConfigurator {
                     state: PhantomData,
                     actual_ip: self.actual_ip,
                     configured_ip: self.configured_ip,
@@ -164,7 +172,7 @@ impl Validateable<ValidationResult> for ServerConfig<Unvalidated> {
     }
 }
 
-fn configure_ip<T>(server_config: &ServerConfig<T>) -> Result<Ipv4Addr> {
+fn configure_ip<T>(server_config: &ServerConfigurator<T>) -> Result<Ipv4Addr> {
     let endpoint = cloudflare::endpoints::dns::dns::UpdateDnsRecord {
         zone_identifier: &server_config.config_zone,
         identifier: &server_config.config_record_id,
@@ -188,17 +196,17 @@ fn configure_ip<T>(server_config: &ServerConfig<T>) -> Result<Ipv4Addr> {
     Ok(configured_ip)
 }
 
-impl Configurable<ServerConfig<Unvalidated>> for ServerConfig<Invalid> {
+impl Configurable<ServerConfigurator<Unvalidated>> for ServerConfigurator<Invalid> {
     fn reconfigure_ip(&mut self) -> Result<()> {
         self.configured_ip = configure_ip(self)?;
         Ok(())
     }
 
-    fn reconfigure(mut self) -> ServerConfig<Unvalidated> {
+    fn reconfigure(mut self) -> ServerConfigurator<Unvalidated> {
         self.log_ips();
         info!("Reconfiguring IP Addresses");
         let _ = self.reconfigure_ip();
-        ServerConfig {
+        ServerConfigurator {
             state: PhantomData,
             actual_ip: self.actual_ip,
             configured_ip: self.configured_ip,
@@ -210,14 +218,15 @@ impl Configurable<ServerConfig<Unvalidated>> for ServerConfig<Invalid> {
     }
 }
 
-impl ServerConfig<Valid> {
+impl ServerConfigurator<Valid> {
     fn complete(self) {
         self.log_ips();
         info!("IP configured correctly");
     }
 }
 
-pub fn configure(server_config: ServerConfig<Unvalidated>) -> Result<()> {
+/// A function to run through the state machine of the `ServerConfigurator`
+pub fn configure(server_config: ServerConfigurator<Unvalidated>) -> Result<()> {
     let mut server_config = server_config.validate();
     loop {
         match server_config {
