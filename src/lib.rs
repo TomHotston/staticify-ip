@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use cloudflare::endpoints::dns::dns;
 use cloudflare::framework;
 use cloudflare::framework::client::blocking_api::HttpApiClient;
+use log::{debug, info, trace};
 use reqwest::blocking::get;
 use std::marker::PhantomData;
 use std::net::Ipv4Addr;
@@ -39,6 +40,10 @@ trait Configurable<T> {
 
 impl ServerConfig {
     pub fn new(token: &str, site: &str, zone: &str) -> Self {
+        debug!(
+            "Created server configurator: configuring {} in zone {}",
+            site, zone
+        );
         let credentials = framework::auth::Credentials::UserAuthToken {
             token: token.to_string(),
         };
@@ -46,6 +51,10 @@ impl ServerConfig {
         let environment = framework::Environment::Production;
         let config_client = HttpApiClient::new(credentials, config, environment)
             .expect("failed to initialise token");
+        trace!(
+            "Cloudflare client successfully configured with token: {}",
+            token
+        );
         Self {
             state: Default::default(),
             actual_ip: Ipv4Addr::new(0, 0, 0, 0),
@@ -60,7 +69,7 @@ impl ServerConfig {
 
 impl<T> ServerConfig<T> {
     fn log_ips(&self) {
-        println!(
+        debug!(
             "actual ip: {:?} configured ip: {:?}",
             self.actual_ip, self.configured_ip
         );
@@ -76,6 +85,7 @@ fn get_configured_ip<T>(server_config: &ServerConfig<T>) -> Result<(Ipv4Addr, St
         },
     };
     let response = server_config.config_client.request(&endpoint)?;
+    trace!("Response returned from Cloudflare {:?}", response);
 
     // Response contains a list of results in the results field
     // Within this each result contains a name that can be used to identify the record
@@ -102,6 +112,11 @@ fn get_configured_ip<T>(server_config: &ServerConfig<T>) -> Result<(Ipv4Addr, St
         .next()
         .ok_or_else(|| anyhow!("no configured record ID value found"))?;
 
+    debug!(
+        "Record found for {}: IP is {} and record ID is {}",
+        server_config.config_site, ip_address, record_id
+    );
+
     Ok((ip_address, record_id))
 }
 
@@ -118,27 +133,33 @@ impl Validateable<ValidationResult> for ServerConfig<Unvalidated> {
 
     fn validate(mut self) -> ValidationResult {
         self.log_ips();
-        println!("Validating IPs");
+        info!("Validating IPs");
         let _ = self.update_ips();
         match self.actual_ip == self.configured_ip {
-            true => ValidationResult::Valid(ServerConfig {
-                state: PhantomData,
-                actual_ip: self.actual_ip,
-                configured_ip: self.configured_ip,
-                config_client: self.config_client,
-                config_site: self.config_site,
-                config_zone: self.config_zone,
-                config_record_id: self.config_record_id,
-            }),
-            false => ValidationResult::Invalid(ServerConfig {
-                state: PhantomData,
-                actual_ip: self.actual_ip,
-                configured_ip: self.configured_ip,
-                config_client: self.config_client,
-                config_site: self.config_site,
-                config_zone: self.config_zone,
-                config_record_id: self.config_record_id,
-            }),
+            true => {
+                info!("IP configuration is valid");
+                ValidationResult::Valid(ServerConfig {
+                    state: PhantomData,
+                    actual_ip: self.actual_ip,
+                    configured_ip: self.configured_ip,
+                    config_client: self.config_client,
+                    config_site: self.config_site,
+                    config_zone: self.config_zone,
+                    config_record_id: self.config_record_id,
+                })
+            }
+            false => {
+                info!("IP configuration is invalid");
+                ValidationResult::Invalid(ServerConfig {
+                    state: PhantomData,
+                    actual_ip: self.actual_ip,
+                    configured_ip: self.configured_ip,
+                    config_client: self.config_client,
+                    config_site: self.config_site,
+                    config_zone: self.config_zone,
+                    config_record_id: self.config_record_id,
+                })
+            }
         }
     }
 }
@@ -157,6 +178,8 @@ fn configure_ip<T>(server_config: &ServerConfig<T>) -> Result<Ipv4Addr> {
         },
     };
     let response = server_config.config_client.request(&endpoint)?;
+    trace!("Response returned from Cloudflare {:?}", response);
+
     let configured_ip = match response.result.content {
         dns::DnsContent::A { content: ip } => Some(ip),
         _ => None,
@@ -173,7 +196,7 @@ impl Configurable<ServerConfig<Unvalidated>> for ServerConfig<Invalid> {
 
     fn reconfigure(mut self) -> ServerConfig<Unvalidated> {
         self.log_ips();
-        println!("Reconfiguring IP Addresses");
+        info!("Reconfiguring IP Addresses");
         let _ = self.reconfigure_ip();
         ServerConfig {
             state: PhantomData,
@@ -190,7 +213,7 @@ impl Configurable<ServerConfig<Unvalidated>> for ServerConfig<Invalid> {
 impl ServerConfig<Valid> {
     fn complete(self) {
         self.log_ips();
-        println!("IP configured correctly");
+        info!("IP configured correctly");
     }
 }
 
