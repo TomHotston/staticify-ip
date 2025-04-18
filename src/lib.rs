@@ -142,7 +142,8 @@ impl Validateable<ValidationResult> for ServerConfigurator<Unvalidated> {
     fn validate(mut self) -> ValidationResult {
         self.log_ips();
         info!("Validating IPs");
-        let _ = self.update_ips();
+        self.update_ips()
+            .expect("error while updating IP addresses");
         match self.actual_ip == self.configured_ip {
             true => {
                 info!("IP configuration is valid");
@@ -205,7 +206,8 @@ impl Configurable<ServerConfigurator<Unvalidated>> for ServerConfigurator<Invali
     fn reconfigure(mut self) -> ServerConfigurator<Unvalidated> {
         self.log_ips();
         info!("Reconfiguring IP Addresses");
-        let _ = self.reconfigure_ip();
+        self.reconfigure_ip()
+            .expect("error while reconfiguring IP addresses");
         ServerConfigurator {
             state: PhantomData,
             actual_ip: self.actual_ip,
