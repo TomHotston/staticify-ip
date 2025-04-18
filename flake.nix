@@ -30,6 +30,7 @@
               rustToolchain
               openssl
               pkg-config
+              cocogitto
             ];
           };
         }
