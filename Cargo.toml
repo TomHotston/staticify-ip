@@ -6,6 +6,9 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.94"
 cloudflare = { version = "0.14.0", features = ["blocking"] }
+env_logger = "0.11.8"
 log = "0.4.27"
 mockall = "0.13.1"
 reqwest = { version = "0.12.15", features = ["blocking"] }
+serde = { version = "1.0.219", features = ["derive"] }
+toml = "0.8.20"
