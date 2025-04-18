@@ -1,189 +1,195 @@
 use anyhow::Result;
-use mockall::predicate::*;
-use mockall::*;
-use std::net::IpAddr;
+use cloudflare::endpoints::dns::dns;
+use cloudflare::framework;
+use cloudflare::framework::client::blocking_api::HttpApiClient;
+use reqwest::blocking::get;
+use std::marker::PhantomData;
+use std::net::Ipv4Addr;
 
-struct Invalid;
-struct Valid;
-struct ServerIp<State = Invalid> {
-    state: std::marker::PhantomData<State>,
-    current_ip: Option<IpAddr>,
-    previous_ip: Option<IpAddr>,
-}
-enum ValidationResult {
-    Valid(ServerIp<Valid>),
-    Invalid(ServerIp<Invalid>),
+const PUBLIC_IP_API: &str = "https://api.ipify.org";
+
+pub struct Unvalidated;
+pub struct Invalid;
+pub struct Valid;
+
+pub struct ServerConfig<State = Unvalidated> {
+    state: PhantomData<State>,
+    actual_ip: Ipv4Addr,
+    configured_ip: Ipv4Addr,
+    config_client: HttpApiClient,
+    config_site: String,
+    config_zone: String,
+    config_record_id: String,
 }
 
-#[automock]
-trait Refreshable {
-    fn get_public_ip(&mut self) -> Option<IpAddr>;
-    fn get_configured_ip(&mut self) -> Option<IpAddr>;
+pub enum ValidationResult {
+    Valid(ServerConfig<Valid>),
+    Invalid(ServerConfig<Invalid>),
 }
 
-#[automock]
-trait Validatable<T> {
+trait Validateable<T> {
     fn validate(self) -> T;
 }
 
-#[automock]
-trait Reconfigurable {
-    fn reconfigure_ip(&self);
+trait Configurable<T> {
+    fn reconfigure(self) -> T;
 }
 
-#[automock]
-trait Storable {
-    fn store_ip(&self);
-}
-
-impl Refreshable for ServerIp<Invalid> {
-    fn get_public_ip(&mut self) -> Option<IpAddr> {
-        todo!()
-    }
-
-    fn get_configured_ip(&mut self) -> Option<IpAddr> {
-        todo!()
-    }
-}
-
-impl<T> Validatable<T> for ServerIp<Invalid> {
-    fn validate(self) -> T{
-        todo!()
-    }
-}
-
-impl Reconfigurable for ServerIp<Invalid> {
-    fn reconfigure_ip(&self) {
-        todo!()
-    }
-}
-
-impl Storable for ServerIp<Valid> {
-    fn store_ip(&self) {
-        todo!()
-    }
-}
-
-impl ServerIp {
-    fn new() -> Self {
+impl ServerConfig {
+    fn new(token: &str, site: &str, zone: &str) -> Self {
+        let credentials = framework::auth::Credentials::UserAuthToken {
+            token: token.to_string(),
+        };
+        let config = framework::client::ClientConfig::default();
+        let environment = framework::Environment::Production;
+        let config_client = HttpApiClient::new(credentials, config, environment)
+            .expect("failed to initialise token");
         Self {
             state: Default::default(),
-            current_ip: None,
-            previous_ip: None,
+            actual_ip: Ipv4Addr::new(0, 0, 0, 0),
+            configured_ip: Ipv4Addr::new(0, 0, 0, 0),
+            config_client,
+            config_site: site.to_string(),
+            config_zone: zone.to_string(),
+            config_record_id: "".to_string(),
         }
     }
 }
 
-fn configure_server_ip<A, B>(mut server_ip: A) -> Result<()>
-where
-    A: Refreshable + Validatable<B>,
-{
-    server_ip.get_public_ip();
-    server_ip.get_configured_ip();
-    match server_ip.validate() {
-        ValidationResult::Valid(valid) => {
-            valid.store_ip();
-            Ok(())
+impl<T> ServerConfig<T> {
+    fn log_ips(&self) {
+        println!(
+            "actual ip: {:?} configured ip: {:?}",
+            self.actual_ip, self.configured_ip
+        );
+    }
+}
+
+fn get_configured_ip<T>(server_config: &ServerConfig<T>) -> Result<(Ipv4Addr, String)> {
+    let endpoint = cloudflare::endpoints::dns::dns::ListDnsRecords {
+        zone_identifier: &server_config.config_zone,
+        params: cloudflare::endpoints::dns::dns::ListDnsRecordsParams {
+            direction: Some(framework::OrderDirection::Ascending),
+            ..Default::default()
+        },
+    };
+    let response = server_config.config_client.request(&endpoint)?;
+
+    // Response contains a list of results in the results field
+    // Within this each result contains a name that can be used to identify the record
+    // Filter the records by the name
+    let dns_record = response
+        .result
+        .iter()
+        .filter(|&r| r.name == server_config.config_site);
+    // Then each record contains arbitary volumes of DNS Content
+    // For A records, this is only the IP address.
+    // Filter out all other records returning only the IP
+    // Then collect first (and hopefully only) record from the iterator
+    let ip_address = dns_record
+        .clone()
+        .filter_map(|r| match r.content {
+            dns::DnsContent::A { content: ip } => Some(ip),
+            _ => None,
+        })
+        .next()
+        .unwrap();
+
+    let record_id = dns_record.map(|r| r.id.clone()).next().unwrap();
+
+    Ok((ip_address, record_id))
+}
+
+fn get_actual_ip() -> Result<Ipv4Addr> {
+    Ok(get(PUBLIC_IP_API)?.text()?.parse()?)
+}
+
+impl Validateable<ValidationResult> for ServerConfig<Unvalidated> {
+    fn validate(self) -> ValidationResult {
+        self.log_ips();
+        println!("Validating IPs");
+        let actual_ip = get_actual_ip().expect("failed to get actual IP");
+        let (configured_ip, record_id) =
+            get_configured_ip(&self).expect("failed to get configured IP");
+        match actual_ip == configured_ip {
+            true => ValidationResult::Valid(ServerConfig {
+                state: PhantomData,
+                actual_ip,
+                configured_ip,
+                config_client: self.config_client,
+                config_site: self.config_site,
+                config_zone: self.config_zone,
+                config_record_id: record_id,
+            }),
+            false => ValidationResult::Invalid(ServerConfig {
+                state: PhantomData,
+                actual_ip,
+                configured_ip,
+                config_client: self.config_client,
+                config_site: self.config_site,
+                config_zone: self.config_zone,
+                config_record_id: record_id,
+            }),
         }
-        ValidationResult::Invalid(mut invalid) => {
-            invalid.reconfigure_ip();
-            invalid.get_configured_ip();
-            match invalid.validate() {
-                ValidationResult::Valid(valid) => {
-                    valid.store_ip();
-                    Ok(())
-                }
-                ValidationResult::Invalid(_) => panic!("IP could not be reassigned"),
+    }
+}
+
+fn configure_ip<T>(server_config: &ServerConfig<T>) -> Result<Ipv4Addr> {
+    let endpoint = cloudflare::endpoints::dns::dns::UpdateDnsRecord {
+        zone_identifier: &server_config.config_zone,
+        identifier: &server_config.config_record_id,
+        params: cloudflare::endpoints::dns::dns::UpdateDnsRecordParams {
+            name: &server_config.config_site,
+            content: cloudflare::endpoints::dns::dns::DnsContent::A {
+                content: server_config.actual_ip,
+            },
+            ttl: Some(1),
+            proxied: Some(true),
+        },
+    };
+    let response = server_config.config_client.request(&endpoint)?;
+    let configured_ip = match response.result.content {
+        dns::DnsContent::A { content: ip } => Some(ip),
+        _ => None,
+    }
+    .unwrap();
+    Ok(configured_ip)
+}
+
+impl Configurable<ServerConfig<Unvalidated>> for ServerConfig<Invalid> {
+    fn reconfigure(self) -> ServerConfig<Unvalidated> {
+        self.log_ips();
+        println!("Reconfiguring IP Addresses");
+        let configured_ip = configure_ip(&self).expect("failed to reconfigure IP");
+        ServerConfig {
+            state: PhantomData,
+            actual_ip: self.actual_ip,
+            configured_ip,
+            config_client: self.config_client,
+            config_site: self.config_site,
+            config_zone: self.config_zone,
+            config_record_id: self.config_record_id,
+        }
+    }
+}
+
+impl ServerConfig<Valid> {
+    fn complete(self) {
+        self.log_ips();
+        println!("IP configured correctly");
+    }
+}
+
+pub fn configure(server_config: ServerConfig<Unvalidated>) -> Result<()> {
+    let mut server_config = server_config.validate();
+    loop {
+        match server_config {
+            ValidationResult::Invalid(invalid) => server_config = invalid.reconfigure().validate(),
+            ValidationResult::Valid(valid) => {
+                valid.complete();
+                break;
             }
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    mock! {
-        SIp {}
-        impl Refreshable for SIp {
-            fn get_public_ip(&mut self) -> Option<IpAddr>;
-            fn get_configured_ip(&mut self) -> Option<IpAddr>;
-        }
-
-        impl Validatable for SIp {
-            fn validate(self) -> ValidationResult;
-        }
-
-        impl Reconfigurable for SIp {
-            fn reconfigure_ip(&self);
-        }
-
-        impl Storable for SIp {
-            fn store_ip(&self);
-        }
-    }
-
-    #[test]
-    fn compare_ips_handles_vaild_ip_addresses_that_match() {
-        let mut mock = MockSIp::new();
-        mock.expect_get_public_ip()
-            .returning(|| "127.0.0.1".parse().ok());
-        mock.expect_get_configured_ip()
-            .returning(|| "127.0.0.1".parse().ok());
-        mock.expect_validate().returning(|| ValidationResult::Valid(SIp<Valid>));
-        configure_server_ip(mock).unwrap();
-    }
-
-    // #[test]
-    // #[should_panic]
-    // fn compare_ips_handles_invalid_public_ip_address() {
-    //     let mut mock = MockReconfigurable::new();
-    //     mock.expect_get_public_ip()
-    //         .returning(|| Ok("".parse::<IpAddr>()?));
-    //     mock.expect_get_last_ip()
-    //         .returning(|| Ok("127.0.0.1".parse::<IpAddr>()?));
-    //     configure_server_ip(mock).unwrap();
-    // }
-
-    // #[test]
-    // #[should_panic]
-    // fn compare_ips_handles_invalid_last_ip_address() {
-    //     let mut mock = MockReconfigurable::new();
-    //     mock.expect_get_last_ip()
-    //         .returning(|| Ok("".parse::<IpAddr>()?));
-    //     mock.expect_get_public_ip()
-    //         .returning(|| Ok("127.0.0.1".parse::<IpAddr>()?));
-    //     configure_server_ip(mock).unwrap();
-    // }
-
-    // #[test]
-    // fn compare_ips_handles_valid_ip_addresses_that_do_not_match_but_reconfigure_correctly() {
-    //     let mut mock = MockReconfigurable::new();
-    //     mock.expect_get_public_ip()
-    //         .returning(|| Ok("127.0.0.2".parse::<IpAddr>()?));
-    //     mock.expect_get_last_ip()
-    //         .returning(|| Ok("127.0.0.1".parse::<IpAddr>()?));
-    //     mock.expect_reconfigure_public_ip()
-    //         .with(eq("127.0.0.2".parse::<IpAddr>().unwrap()))
-    //         .return_const(());
-    //     mock.expect_readback_configured_ip()
-    //         .returning(|| Ok("127.0.0.2".parse::<IpAddr>()?));
-    //     configure_server_ip(mock).unwrap();
-    // }
-
-    // #[test]
-    // #[should_panic]
-    // fn compare_ips_handles_valid_ip_addresses_that_do_not_match_and_reconfigure_incorrectly() {
-    //     let mut mock = MockReconfigurable::new();
-    //     mock.expect_get_public_ip()
-    //         .returning(|| Ok("127.0.0.2".parse::<IpAddr>()?));
-    //     mock.expect_get_last_ip()
-    //         .returning(|| Ok("127.0.0.1".parse::<IpAddr>()?));
-    //     mock.expect_reconfigure_public_ip()
-    //         .with(eq("127.0.0.2".parse::<IpAddr>().unwrap()))
-    //         .return_const(());
-    //     mock.expect_readback_configured_ip()
-    //         .returning(|| Ok("127.0.0.1".parse::<IpAddr>()?));
-    //     configure_server_ip(mock).unwrap();
-    // }
+    Ok(())
 }
