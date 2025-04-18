@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use cloudflare::endpoints::dns::dns;
 use cloudflare::framework;
 use cloudflare::framework::client::blocking_api::HttpApiClient;
@@ -28,15 +28,17 @@ pub enum ValidationResult {
 }
 
 trait Validateable<T> {
+    fn update_ips(&mut self) -> Result<()>;
     fn validate(self) -> T;
 }
 
 trait Configurable<T> {
+    fn reconfigure_ip(&mut self) -> Result<()>;
     fn reconfigure(self) -> T;
 }
 
 impl ServerConfig {
-    fn new(token: &str, site: &str, zone: &str) -> Self {
+    pub fn new(token: &str, site: &str, zone: &str) -> Self {
         let credentials = framework::auth::Credentials::UserAuthToken {
             token: token.to_string(),
         };
@@ -93,9 +95,12 @@ fn get_configured_ip<T>(server_config: &ServerConfig<T>) -> Result<(Ipv4Addr, St
             _ => None,
         })
         .next()
-        .unwrap();
+        .ok_or_else(|| anyhow!("no configured IP address value found"))?;
 
-    let record_id = dns_record.map(|r| r.id.clone()).next().unwrap();
+    let record_id = dns_record
+        .map(|r| r.id.clone())
+        .next()
+        .ok_or_else(|| anyhow!("no configured record ID value found"))?;
 
     Ok((ip_address, record_id))
 }
@@ -105,30 +110,34 @@ fn get_actual_ip() -> Result<Ipv4Addr> {
 }
 
 impl Validateable<ValidationResult> for ServerConfig<Unvalidated> {
-    fn validate(self) -> ValidationResult {
+    fn update_ips(&mut self) -> Result<()> {
+        self.actual_ip = get_actual_ip()?;
+        (self.configured_ip, self.config_record_id) = get_configured_ip(self)?;
+        Ok(())
+    }
+
+    fn validate(mut self) -> ValidationResult {
         self.log_ips();
         println!("Validating IPs");
-        let actual_ip = get_actual_ip().expect("failed to get actual IP");
-        let (configured_ip, record_id) =
-            get_configured_ip(&self).expect("failed to get configured IP");
-        match actual_ip == configured_ip {
+        let _ = self.update_ips();
+        match self.actual_ip == self.configured_ip {
             true => ValidationResult::Valid(ServerConfig {
                 state: PhantomData,
-                actual_ip,
-                configured_ip,
+                actual_ip: self.actual_ip,
+                configured_ip: self.configured_ip,
                 config_client: self.config_client,
                 config_site: self.config_site,
                 config_zone: self.config_zone,
-                config_record_id: record_id,
+                config_record_id: self.config_record_id,
             }),
             false => ValidationResult::Invalid(ServerConfig {
                 state: PhantomData,
-                actual_ip,
-                configured_ip,
+                actual_ip: self.actual_ip,
+                configured_ip: self.configured_ip,
                 config_client: self.config_client,
                 config_site: self.config_site,
                 config_zone: self.config_zone,
-                config_record_id: record_id,
+                config_record_id: self.config_record_id,
             }),
         }
     }
@@ -152,19 +161,24 @@ fn configure_ip<T>(server_config: &ServerConfig<T>) -> Result<Ipv4Addr> {
         dns::DnsContent::A { content: ip } => Some(ip),
         _ => None,
     }
-    .unwrap();
+    .ok_or_else(|| anyhow!("no valid IP found to be configured"))?;
     Ok(configured_ip)
 }
 
 impl Configurable<ServerConfig<Unvalidated>> for ServerConfig<Invalid> {
-    fn reconfigure(self) -> ServerConfig<Unvalidated> {
+    fn reconfigure_ip(&mut self) -> Result<()> {
+        self.configured_ip = configure_ip(self)?;
+        Ok(())
+    }
+
+    fn reconfigure(mut self) -> ServerConfig<Unvalidated> {
         self.log_ips();
         println!("Reconfiguring IP Addresses");
-        let configured_ip = configure_ip(&self).expect("failed to reconfigure IP");
+        let _ = self.reconfigure_ip();
         ServerConfig {
             state: PhantomData,
             actual_ip: self.actual_ip,
-            configured_ip,
+            configured_ip: self.configured_ip,
             config_client: self.config_client,
             config_site: self.config_site,
             config_zone: self.config_zone,
