@@ -22,11 +22,8 @@ cog verify --file $1
 cog check
 cargo fmt -v --all --check
 cargo clippy
+cargo2nix -o
 """
-
-# Or file path
-[git_hooks.pre-push]
-path = "hooks/pre-push.sh"
 
 [commit_types]
 
