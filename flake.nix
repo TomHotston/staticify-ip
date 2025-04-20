@@ -16,11 +16,13 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-overlay, cargo2nix }: 
-    flake-utils.lib.eachDefaultSystem
-      (system:
-        let
-          overlays = [ (import rust-overlay) cargo2nix.overlays.default];
+  outputs = { self, nixpkgs, flake-utils, rust-overlay, cargo2nix } @ inputs:
+    let
+      overlays = [ (import rust-overlay) cargo2nix.overlays.default];
+    in
+    {
+      packages = flake-utils.lib.eachDefaultSystemMap
+        (system: let
           pkgs = import nixpkgs {
             inherit system overlays;
           };
@@ -29,15 +31,23 @@
             rustVersion = rustToolchain.version;
             packageFun = import ./Cargo.nix;
           };
-        in
-        with pkgs;
-        rec
-        {
-          packages = {
+        in {
             staticify-ip = (rustPkgs.workspace.staticify-ip {});
-            default = packages.staticify-ip;
-         };
-          devShells.default = mkShell {
+            default = inputs.self.packages.${system}.staticify-ip;
+        }
+      );
+
+      nixosModules.default = import ./modules/nixos.nix inputs;
+
+      devShells = flake-utils.lib.eachDefaultSystemMap
+        (system: let
+          pkgs = import nixpkgs {
+            inherit system overlays;
+          };
+          rustToolchain = pkgs.pkgsBuildHost.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        in
+        with pkgs; {
+          default = mkShell {
             buildInputs = [
               rustToolchain
               openssl
@@ -48,4 +58,5 @@
           };
         }
       );
+    };
 }
